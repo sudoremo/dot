@@ -1,0 +1,1060 @@
+#!/usr/bin/env ruby
+
+require 'csv'
+require 'fileutils'
+require 'pathname'
+require 'set'
+require 'shellwords'
+require 'bundler/inline'
+
+# Ensure gum is installed for better CLI prompts
+unless system('which gum > /dev/null 2>&1')
+  puts "Installing gum for better CLI experience..."
+  system('brew install gum')
+end
+
+# Suppress bundler warnings about missing extensions
+# Temporarily redirect both stdout and stderr for bundler
+original_stdout = $stdout
+original_stderr = $stderr
+$stdout = File.open(File::NULL, 'w')
+$stderr = File.open(File::NULL, 'w')
+
+gemfile(true) do
+  source 'https://rubygems.org'
+
+  gem 'colorize'
+  gem 'pry'
+  gem 'clamp'
+end
+
+$stdout = original_stdout
+$stderr = original_stderr
+
+module Dotpro
+  # Resolve the dotfiles directory. Prefers DOT_DIR from the environment
+  # (set by the wrapper script), falls back to $0's parent directory.
+  DOT_DIR = Pathname.new(ENV['DOT_DIR'] || File.dirname(File.expand_path($0)))
+
+  def self.hostname
+    @hostname ||= begin
+      path = DOT_DIR.join('switches/hostname').to_s
+      unless File.exist?(path)
+        puts "\e[31mError: Hostname not configured.\e[0m"
+        puts "Run '\e[33m./dot setup <hostname>\e[0m' first to configure this machine."
+        exit 1
+      end
+      File.read(path).strip
+    end
+  end
+
+  # Helper registry - allows mods to define reusable helpers that dependent mods can call
+  @helpers = {}
+
+  def self.register_helper(name, mod_name, &block)
+    @helpers[name.to_sym] = { mod: mod_name.to_sym, block: block }
+  end
+
+  def self.helpers
+    @helpers
+  end
+
+  def self.clear_helpers!
+    @helpers = {}
+  end
+
+  module Output
+    module_function
+
+    @indent_level = 0
+
+    def indent_level
+      @indent_level ||= 0
+    end
+
+    def indent_level=(level)
+      @indent_level = level
+    end
+
+    def indent
+      '  ' * indent_level
+    end
+
+    def with_indent
+      self.indent_level += 1
+      yield
+    ensure
+      self.indent_level -= 1
+    end
+
+    def header(text, hosts: nil)
+      host_info = if hosts.nil? || hosts.empty?
+                    '[all hosts]'.light_black
+                  else
+                    "[#{hosts.join(', ')}]".light_black
+                  end
+      puts "\n#{"#{text}".bold.yellow} #{host_info}"
+    end
+
+    def task(text, type: nil)
+      type_label = type ? " [#{type}]".light_black : ''
+      puts "#{indent}#{'●'.blue} #{text}#{type_label}"
+    end
+
+    def subtask(text)
+      puts "#{indent}  #{'●'.cyan} #{text}"
+    end
+
+    def detail(text)
+      puts "#{indent}    #{'#'.light_black} #{text.light_black}"
+    end
+
+    def arrow(text)
+      puts "#{indent}  #{'⊸'.light_black} #{text}"
+    end
+
+    def success(text)
+      puts "#{indent}  #{'✔'.green} #{text.green}"
+    end
+
+    def error(text)
+      puts "#{indent}  #{'✖'.red} #{text.red}"
+    end
+
+    def warning(text)
+      puts "#{indent}  #{'⚠'.yellow} #{text.yellow}"
+    end
+
+    def note(text)
+      puts "#{indent}  #{'◆'.blue} #{text.light_black}"
+    end
+
+    def confirm(question)
+      puts
+      system("gum confirm #{Shellwords.escape(question)}")
+      $?.exitstatus == 0
+    end
+
+    def confirm_or_abort(question)
+      unless confirm(question)
+        error('Aborted.')
+        exit 1
+      end
+    end
+  end
+
+  class Mod
+    attr_reader :name, :dependencies, :hosts, :priority, :on_demand
+
+    def initialize(path)
+      @path = path
+      @name = path.parent.basename.to_s.to_sym
+      @dependencies = []
+      @hosts = []
+      @priority = 50 # default priority
+      @on_demand = false
+
+      env = ScopedEnv.new(self, %i[dsl_use dsl_hosts dsl_priority dsl_on_demand dsl_up dsl_down dsl_test dsl_helper], :dsl_)
+      env.instance_eval(@path.read)
+    end
+
+    def dsl_use(*mods)
+      @dependencies += mods.map(&:to_sym)
+    end
+
+    def dsl_hosts(*host_list)
+      @hosts += host_list.map(&:to_sym)
+    end
+
+    def dsl_priority(value)
+      @priority = case value
+                  when :first  then 0
+                  when :early  then 25
+                  when :normal then 50
+                  when :late   then 75
+                  when :last   then 100
+                  when Integer then value
+                  else raise "Invalid priority '#{value}'. Use :first, :early, :normal, :late, :last, or an integer."
+                  end
+    end
+
+    def dsl_on_demand
+      @on_demand = true
+    end
+
+    def dsl_helper(name, &block)
+      ::Dotpro.register_helper(name, @name, &block)
+    end
+
+    def dsl_up(&block)
+      @up = Runbook.new(@path.parent, mod_name: @name, dependencies: @dependencies, &block)
+    end
+
+    def dsl_down(&block)
+      @down = Runbook.new(@path.parent, mod_name: @name, dependencies: @dependencies, &block)
+    end
+
+    def dsl_test(&block)
+      @test = Runbook.new(@path.parent, mod_name: @name, dependencies: @dependencies, &block)
+    end
+
+    def run(force: false, update: false)
+      # Skip if hosts are specified and current host is not in the list
+      # unless explicitly forced (mod was specifically requested)
+      if !force && @hosts.any? && !@hosts.include?(::Dotpro.hostname.to_sym)
+        Output.note("Skipping #{@name} (not for host '#{::Dotpro.hostname}')")
+        return
+      end
+
+      Output.header(@name.to_s.split('_').map(&:capitalize).join(' '), hosts: @hosts)
+      @up&.run(update: update)
+    end
+
+    def run_down(force: false)
+      # Skip if hosts are specified and current host is not in the list
+      # unless explicitly forced (mod was specifically requested)
+      if !force && @hosts.any? && !@hosts.include?(::Dotpro.hostname.to_sym)
+        Output.note("Skipping #{@name} (not for host '#{::Dotpro.hostname}')")
+        return
+      end
+
+      Output.header(@name.to_s.split('_').map(&:capitalize).join(' '), hosts: @hosts)
+      @down&.run
+    end
+
+    def run_test(force: false)
+      return :no_test unless @test
+
+      if !force && @hosts.any? && !@hosts.include?(::Dotpro.hostname.to_sym)
+        Output.note("Skipping #{@name} tests (not for host '#{::Dotpro.hostname}')")
+        return :skipped
+      end
+
+      Output.header("Testing #{@name}", hosts: @hosts)
+      begin
+        @test.run
+        :passed
+      rescue => e
+        Output.error("Test failed: #{e.message}")
+        :failed
+      end
+    end
+
+    def has_test?
+      !@test.nil?
+    end
+  end
+
+  class Runbook
+    DSL_METHODS = %i[
+      dsl_run dsl_symlink dsl_mkdir_p dsl_rm dsl_rm_rf dsl_cp
+      dsl_chmod dsl_dir? dsl_file? dsl_symlink? dsl_files_identical?
+      dsl_install_brew dsl_remove_brew dsl_install_cask dsl_remove_cask
+      dsl_install_gem dsl_install_pip dsl_install_mas dsl_enable_remote_login
+      dsl_note dsl_confirm_or_abort dsl_mod_dir dsl_update? dsl_host?
+      dsl_helpers
+    ].freeze
+
+    def initialize(mod_dir, mod_name: nil, dependencies: [], &block)
+      @mod_dir = mod_dir
+      @mod_name = mod_name
+      @dependencies = dependencies
+      @block = block || proc {}
+      @update = false
+    end
+
+    def run(update: false)
+      @update = update
+      env = ScopedEnv.new(self, DSL_METHODS, :dsl_)
+      env.instance_exec(&@block)
+    end
+
+    private
+
+    def exec_cmd(command, sudo: false, fail_silently: false)
+      full_command = sudo ? "sudo #{command}" : command
+      unbundled_env = Bundler.respond_to?(:with_unbundled_env) ? :with_unbundled_env : :with_clean_env
+      result = Bundler.send(unbundled_env) { system(full_command) }
+      exit_status = $?.exitstatus
+
+      unless result
+        return false if fail_silently
+        raise "Command failed (exit #{exit_status}): #{command}"
+      end
+      true
+    end
+
+    def resolve_path(path)
+      path = path.to_s
+      if path.start_with?('./')
+        @mod_dir.join(path[2..]).to_s
+      elsif path.start_with?('~')
+        File.expand_path(path)
+      else
+        path
+      end
+    end
+
+    def dsl_run(command, sudo: false)
+      Output.task("Run command#{sudo ? ' (sudo)' : ''}", type: 'script')
+      Output.detail(command)
+      exec_cmd(command, sudo: sudo)
+      Output.success('Done')
+    rescue => e
+      Output.error(e.message)
+      raise
+    end
+
+    def dsl_symlink(from, to, sudo: false)
+      from = resolve_path(from)
+      to = resolve_path(to)
+
+      if File.exist?(to) || File.symlink?(to)
+        # Check what currently exists at the target
+        if File.symlink?(to)
+          current_target = File.readlink(to)
+          if current_target == from
+            Output.task("Symlink #{File.basename(to)}#{sudo ? ' (sudo)' : ''}", type: 'symlink')
+            Output.note("Already exists: #{to} → #{from}")
+            return
+          else
+            Output.task("Symlink #{File.basename(to)}#{sudo ? ' (sudo)' : ''}", type: 'symlink')
+            Output.warning('Target is a symlink but points elsewhere')
+            Output.detail("Current target: #{current_target}")
+            Output.detail("Expected target: #{from}")
+          end
+        elsif File.directory?(to)
+          Output.task("Symlink #{File.basename(to)}#{sudo ? ' (sudo)' : ''}", type: 'symlink')
+          Output.warning('Target exists as a directory (not a symlink)')
+          Output.detail("Current: #{to} (directory)")
+          Output.detail("Expected: #{to} → #{from}")
+        elsif File.file?(to)
+          Output.task("Symlink #{File.basename(to)}#{sudo ? ' (sudo)' : ''}", type: 'symlink')
+          Output.warning('Target exists as a file (not a symlink)')
+          Output.detail("Current: #{to} (file)")
+          Output.detail("Expected: #{to} → #{from}")
+        end
+
+        Output.confirm_or_abort('Remove existing and create symlink?')
+        if sudo
+          exec_cmd("rm -rf #{Shellwords.escape(to)}", sudo: true)
+        else
+          FileUtils.rm_rf(to)
+        end
+      else
+        Output.task("Symlink #{File.basename(to)}#{sudo ? ' (sudo)' : ''}", type: 'symlink')
+      end
+
+      # Create parent directory if needed
+      parent_dir = File.dirname(to)
+      unless File.exist?(parent_dir)
+        if sudo
+          exec_cmd("mkdir -p #{Shellwords.escape(parent_dir)}", sudo: true)
+        else
+          FileUtils.mkdir_p(parent_dir)
+        end
+      end
+
+      Output.subtask("#{to} → #{from}")
+      if sudo
+        exec_cmd("ln -s #{Shellwords.escape(from)} #{Shellwords.escape(to)}", sudo: true)
+      else
+        FileUtils.ln_s(from, to)
+      end
+    end
+
+    def dsl_mkdir_p(path)
+      path = resolve_path(path)
+      Output.task("Create directory", type: 'mkdir')
+      if Dir.exist?(path)
+        Output.note("Already exists: #{path}")
+      else
+        Output.subtask(path)
+        FileUtils.mkdir_p(path)
+      end
+    end
+
+    def dsl_rm(path, sudo: false)
+      path = resolve_path(path)
+      Output.task("Remove file#{sudo ? ' (sudo)' : ''}", type: 'rm')
+      if File.exist?(path) || File.symlink?(path)
+        Output.subtask(path)
+        if sudo
+          exec_cmd("rm -f #{Shellwords.escape(path)}", sudo: true, fail_silently: true)
+        else
+          FileUtils.rm(path)
+        end
+      else
+        Output.note("Does not exist: #{path}")
+      end
+    end
+
+    def dsl_rm_rf(path, sudo: false)
+      path = resolve_path(path)
+      Output.task("Remove#{sudo ? ' (sudo)' : ''}", type: 'rm')
+      if File.exist?(path) || File.symlink?(path)
+        Output.subtask(path)
+        if sudo
+          exec_cmd("rm -rf #{Shellwords.escape(path)}", sudo: true, fail_silently: true)
+        else
+          FileUtils.rm_rf(path)
+        end
+      else
+        Output.note("Does not exist: #{path}")
+      end
+    end
+
+    def dsl_chmod(mode, path)
+      path = resolve_path(path)
+      Output.task("Set permissions", type: 'chmod')
+      Output.subtask("#{mode.is_a?(Integer) ? mode.to_s(8) : mode} on #{path}")
+      FileUtils.chmod(mode, path)
+    end
+
+    def dsl_dir?(path)
+      Dir.exist?(resolve_path(path))
+    end
+
+    def dsl_file?(path)
+      File.exist?(resolve_path(path))
+    end
+
+    def dsl_update?
+      @update
+    end
+
+    def dsl_host?(*hosts)
+      hosts.map(&:to_sym).include?(::Dotpro.hostname.to_sym)
+    end
+
+    def installed_brew_packages
+      @installed_brew_packages ||= `brew list --formula -1 2>/dev/null`.split("\n").to_set
+    end
+
+    def installed_brew_casks
+      @installed_brew_casks ||= `brew list --cask -1 2>/dev/null`.split("\n").to_set
+    end
+
+    def cask_artifacts_exist?(cask)
+      json = `brew info --json=v2 --cask #{cask} 2>/dev/null`
+      return false if json.empty?
+
+      require 'json'
+      info = JSON.parse(json) rescue nil
+      return false unless info
+
+      artifacts = info.dig('casks', 0, 'artifacts') || []
+      app_artifacts = artifacts.select { |a| a.is_a?(Hash) && a['app'] }
+
+      # If no app artifacts, assume cask is correctly installed (e.g., pkg-only casks)
+      return true if app_artifacts.empty?
+
+      # Check that at least one app artifact exists
+      app_artifacts.any? do |artifact|
+        apps = artifact['app']
+        apps = [apps] unless apps.is_a?(Array)
+        apps.any? { |app| File.exist?("/Applications/#{app}") }
+      end
+    end
+
+    def dsl_install_brew(package)
+      package = package.to_s
+
+      if @update && installed_brew_packages.include?(package)
+        Output.task("Update #{package}", type: 'brew')
+        Output.subtask("Updating...")
+        exec_cmd("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew upgrade #{package}", fail_silently: true)
+      else
+        Output.task("Install #{package}", type: 'brew')
+        if installed_brew_packages.include?(package)
+          Output.note("Already installed")
+        else
+          Output.subtask("Installing...")
+          exec_cmd("brew install #{package}")
+          @installed_brew_packages << package
+        end
+      end
+    end
+
+    def dsl_remove_brew(package)
+      package = package.to_s
+      Output.task("Remove #{package}", type: 'brew')
+      Output.subtask("Uninstalling...")
+      exec_cmd("brew uninstall -f #{package} >/dev/null 2>&1", fail_silently: true)
+      @installed_brew_packages&.delete(package)
+    end
+
+    def dsl_install_cask(cask)
+      cask = cask.to_s
+      cask_listed = installed_brew_casks.include?(cask)
+      artifacts_present = cask_listed && cask_artifacts_exist?(cask)
+
+      if @update && artifacts_present
+        Output.task("Update #{cask}", type: 'cask')
+        Output.subtask("Updating...")
+        exec_cmd("brew upgrade --cask #{cask}", fail_silently: true)
+      else
+        Output.task("Install #{cask}", type: 'cask')
+        if artifacts_present
+          Output.note("Already installed")
+        elsif cask_listed
+          Output.subtask("Reinstalling (app missing)...")
+          exec_cmd("brew reinstall --cask #{cask}")
+        else
+          Output.subtask("Installing...")
+          exec_cmd("brew install --cask #{cask}")
+          @installed_brew_casks << cask
+        end
+      end
+    end
+
+    def dsl_remove_cask(cask)
+      cask = cask.to_s
+      Output.task("Remove #{cask}", type: 'cask')
+      Output.subtask("Uninstalling...")
+      exec_cmd("brew uninstall --cask #{cask} >/dev/null 2>&1", fail_silently: true)
+      @installed_brew_casks&.delete(cask)
+    end
+
+    def dsl_install_gem(package)
+      package = package.to_s
+      gem_name = package.split.first
+
+      check_result = `gem spec #{gem_name} 2>&1`
+      is_installed = !(check_result.include?('Could not find') || check_result.include?('ERROR'))
+
+      if @update && is_installed
+        Output.task("Update #{gem_name}", type: 'gem')
+        Output.subtask("Updating...")
+        exec_cmd("gem update #{gem_name}", fail_silently: true)
+      else
+        Output.task("Install #{gem_name}", type: 'gem')
+        if is_installed
+          Output.note("Already installed")
+        else
+          Output.subtask("Installing...")
+          exec_cmd("gem install #{package}")
+        end
+      end
+    end
+
+    def dsl_install_pip(package)
+      package = package.to_s
+      if @update
+        Output.task("Update #{package}", type: 'pip')
+        Output.subtask("Updating...")
+        exec_cmd("/usr/bin/env python3 -m pip install --upgrade --quiet --disable-pip-version-check --break-system-packages #{package}", fail_silently: true)
+      else
+        Output.task("Install #{package}", type: 'pip')
+        Output.subtask("Installing...")
+        exec_cmd("/usr/bin/env python3 -m pip install --quiet --disable-pip-version-check --break-system-packages #{package}", fail_silently: true)
+      end
+    end
+
+    def dsl_install_mas(app_id, name)
+      app_id = app_id.to_s
+      installed = `mas list 2>/dev/null`.include?(app_id)
+
+      Output.task("Install #{name}", type: 'mas')
+      if installed
+        Output.note("Already installed")
+      else
+        Output.subtask("Installing from Mac App Store...")
+        exec_cmd("mas install #{app_id}", fail_silently: true)
+      end
+    end
+
+    def dsl_cp(from, to, sudo: false)
+      from = resolve_path(from)
+      to = resolve_path(to)
+
+      Output.task("Copy #{File.basename(from)}#{sudo ? ' (sudo)' : ''}", type: 'cp')
+      if dsl_files_identical?(from, to)
+        Output.note("Already up to date: #{to}")
+        return false
+      end
+
+      Output.subtask("#{from} → #{to}")
+      if sudo
+        exec_cmd("cp #{Shellwords.escape(from)} #{Shellwords.escape(to)}", sudo: true)
+      else
+        FileUtils.cp(from, to)
+      end
+      Output.success('Done')
+      true
+    end
+
+    def dsl_symlink?(path)
+      File.symlink?(resolve_path(path))
+    end
+
+    def dsl_files_identical?(file1, file2)
+      file1 = resolve_path(file1)
+      file2 = resolve_path(file2)
+
+      return false unless File.exist?(file1) && File.exist?(file2)
+
+      FileUtils.compare_file(file1, file2)
+    end
+
+    def dsl_enable_remote_login
+      Output.task("Enable remote login", type: 'system')
+      # Check if SSH service is enabled (doesn't require sudo)
+      output = `launchctl print-disabled system 2>/dev/null | grep 'com.openssh.sshd'`.strip
+      if output.include?('=> enabled') || output.include?('=> false')
+        Output.note('Already enabled')
+      else
+        Output.subtask("Enabling...")
+        exec_cmd('systemsetup -setremotelogin on', sudo: true)
+        Output.success('Enabled')
+      end
+    end
+
+    def dsl_note(text)
+      Output.note(text)
+    end
+
+    def dsl_confirm_or_abort(question)
+      Output.confirm_or_abort(question)
+    end
+
+    def dsl_mod_dir
+      @mod_dir.to_s
+    end
+
+    def dsl_helpers
+      # Include the mod's own name so it can call its own helpers
+      allowed = @mod_name ? @dependencies + [@mod_name] : @dependencies
+      HelperProxy.new(self, allowed)
+    end
+  end
+
+  # Proxy class for accessing helpers with dependency checking
+  class HelperProxy
+    def initialize(runbook, allowed_dependencies)
+      @runbook = runbook
+      @allowed_dependencies = allowed_dependencies
+    end
+
+    def method_missing(name, *args, **kwargs, &block)
+      helper = ::Dotpro.helpers[name.to_sym]
+
+      unless helper
+        raise NoMethodError, "Unknown helper '#{name}'. Available helpers: #{::Dotpro.helpers.keys.join(', ')}"
+      end
+
+      unless @allowed_dependencies.include?(helper[:mod])
+        raise "Helper '#{name}' is defined by '#{helper[:mod]}' which is not a dependency. " \
+              "Add 'use :#{helper[:mod]}' to use this helper."
+      end
+
+      # Execute the helper block through a ScopedEnv so DSL methods work
+      env = ScopedEnv.new(@runbook, Runbook::DSL_METHODS, :dsl_)
+      env.instance_exec(*args, **kwargs, &helper[:block])
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      ::Dotpro.helpers.key?(name.to_sym) || super
+    end
+  end
+
+  class CircularDependencyError < StandardError; end
+  class UnknownDependencyError < StandardError; end
+
+  class ModLoader
+    def initialize(base_dir)
+      @base_dir = base_dir
+    end
+
+    def load
+      mods = Dir.glob(@base_dir.join('mods/*/mod.rb')).map do |path|
+        Mod.new(Pathname.new(path))
+      end
+
+      DependencyResolver.new(mods).resolve
+    end
+  end
+
+  class DependencyResolver
+    def initialize(mods)
+      @mods = mods
+      @mods_by_name = mods.to_h { |m| [m.name, m] }
+    end
+
+    def resolve
+      validate_dependencies!
+      detect_cycles!
+      topological_sort_with_priority
+    end
+
+    private
+
+    def validate_dependencies!
+      @mods.each do |mod|
+        mod.dependencies.each do |dep|
+          unless @mods_by_name.key?(dep)
+            raise UnknownDependencyError, "Module '#{mod.name}' depends on unknown module '#{dep}'"
+          end
+        end
+      end
+    end
+
+    # Detect cycles using DFS (separate from sorting for clearer error messages)
+    def detect_cycles!
+      visited = {}
+      @mods.each do |mod|
+        detect_cycle_from(mod.name, visited, [])
+      end
+    end
+
+    def detect_cycle_from(name, visited, path)
+      return if visited[name] == :permanent
+
+      if visited[name] == :temporary
+        cycle = path.drop_while { |n| n != name } + [name]
+        raise CircularDependencyError, "Circular dependency detected: #{cycle.join(' -> ')}"
+      end
+
+      visited[name] = :temporary
+      path.push(name)
+
+      @mods_by_name[name].dependencies.each do |dep|
+        detect_cycle_from(dep, visited, path)
+      end
+
+      path.pop
+      visited[name] = :permanent
+    end
+
+    # Kahn's algorithm with priority as tiebreaker
+    # Among mods that are "ready" (all deps satisfied), lower priority runs first
+    def topological_sort_with_priority
+      # Build reverse dependency map: for each mod, which mods depend on it?
+      dependents = Hash.new { |h, k| h[k] = [] }
+      @mods.each do |mod|
+        mod.dependencies.each do |dep|
+          dependents[dep] << mod.name
+        end
+      end
+
+      # Compute in-degree (number of unsatisfied dependencies) for each mod
+      in_degree = {}
+      @mods.each { |mod| in_degree[mod.name] = mod.dependencies.size }
+
+      # Start with mods that have no dependencies
+      ready = @mods.select { |m| in_degree[m.name] == 0 }
+      result = []
+
+      until ready.empty?
+        # Sort by priority (lower first), then by name for determinism
+        ready.sort_by! { |m| [m.priority, m.name.to_s] }
+        mod = ready.shift
+        result << mod
+
+        # For each mod that depends on this one, decrement in-degree
+        dependents[mod.name].each do |dependent_name|
+          in_degree[dependent_name] -= 1
+          if in_degree[dependent_name] == 0
+            ready << @mods_by_name[dependent_name]
+          end
+        end
+      end
+
+      result
+    end
+  end
+
+  class Dotpro
+    def initialize
+      @base_dir = DOT_DIR
+    end
+
+    def setup(hostname)
+      switches_dir = @base_dir.join('switches')
+      setup_flag = switches_dir.join('set-up')
+      hostname_file = switches_dir.join('hostname')
+
+      # Check if already set up
+      if setup_flag.exist?
+        Output.error('Setup has already been run')
+        exit 1
+      end
+
+      Output.header('Setup')
+
+      # Create switches directory if needed
+      FileUtils.mkdir_p(switches_dir)
+
+      # Write hostname
+      Output.task("Set hostname to '#{hostname}'", type: 'config')
+      File.write(hostname_file, hostname)
+
+      # Set system hostname
+      Output.task('Set system hostname', type: 'system')
+      runbook = Runbook.new(Pathname.new(__FILE__).parent) {}
+      runbook.send(:exec_cmd, "hostname #{hostname}", sudo: true)
+
+      # Mark as set up
+      FileUtils.touch(setup_flag)
+
+      Output.success('Setup complete. Run "dot up" to apply configuration.')
+    end
+
+    def up(only: nil, update: false)
+      @mods ||= ModLoader.new(@base_dir).load
+
+      if only
+        names = only.map(&:to_sym)
+        unknown = names - @mods.map(&:name)
+        raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
+
+        # Track explicitly requested mods (force install regardless of host)
+        explicitly_requested = Set.new(names)
+
+        # Include all dependencies of requested modules
+        names_with_deps = collect_dependencies(names)
+        mods_to_run = @mods.select { |m| names_with_deps.include?(m.name) }
+
+        # Run mods - force all (including dependencies) since they're required by explicit request
+        # Only apply updates to explicitly requested mods
+        mods_to_run.each do |mod|
+          is_explicit = explicitly_requested.include?(mod.name)
+          mod.run(force: true, update: update && is_explicit)
+        end
+      else
+        # No mods specified, run all applicable mods normally (skip on_demand mods)
+        @mods.reject(&:on_demand).each { |mod| mod.run(update: update) }
+      end
+    end
+
+    def down(only: nil)
+      @mods ||= ModLoader.new(@base_dir).load
+
+      if only
+        names = only.map(&:to_sym)
+        unknown = names - @mods.map(&:name)
+        raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
+
+        # Only tear down explicitly requested mods, NOT their dependencies
+        # Dependencies might be used by other mods
+        mods_to_run = @mods.select { |m| names.include?(m.name) }
+
+        mods_to_run.each do |mod|
+          mod.run_down(force: true)
+        end
+      else
+        # No mods specified, run all applicable mods normally
+        @mods.reverse.each(&:run_down)
+      end
+    end
+
+    def test(only: nil, skip_deps: false)
+      @mods ||= ModLoader.new(@base_dir).load
+
+      results = { passed: [], failed: [], skipped: [], no_test: [] }
+
+      mods_to_test = if only
+        names = only.map(&:to_sym)
+        unknown = names - @mods.map(&:name)
+        raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
+
+        explicitly_requested = Set.new(names)
+
+        if skip_deps
+          @mods.select { |m| names.include?(m.name) }
+        else
+          names_with_deps = collect_dependencies(names)
+          @mods.select { |m| names_with_deps.include?(m.name) }
+        end
+      else
+        @mods.select(&:has_test?)
+      end
+
+      mods_to_test.each do |mod|
+        is_explicit = only.nil? || only.map(&:to_sym).include?(mod.name)
+        result = mod.run_test(force: is_explicit)
+
+        case result
+        when :passed then results[:passed] << mod.name
+        when :failed then results[:failed] << mod.name
+        when :skipped then results[:skipped] << mod.name
+        when :no_test then results[:no_test] << mod.name
+        end
+      end
+
+      puts
+      Output.header('Test Summary')
+      Output.success("Passed: #{results[:passed].join(', ')}") if results[:passed].any?
+      Output.error("Failed: #{results[:failed].join(', ')}") if results[:failed].any?
+      Output.note("Skipped: #{results[:skipped].join(', ')}") if results[:skipped].any?
+      Output.note("No tests: #{results[:no_test].join(', ')}") if results[:no_test].any? && only
+
+      results[:failed].empty? ? 0 : 1
+    end
+
+    def list
+      @mods ||= ModLoader.new(@base_dir).load
+      current_host = ::Dotpro.hostname.to_sym
+
+      headers = ['Module', 'For This Host', 'On Demand', 'Dependencies', 'Configured Hosts']
+
+      # Prepare data for the table as arrays
+      rows = @mods.map do |mod|
+        host_status = if mod.hosts.empty?
+                        'all'
+                      elsif mod.hosts.include?(current_host)
+                        'yes'
+                      else
+                        'no'
+                      end
+
+        deps = mod.dependencies.empty? ? '-' : mod.dependencies.join(', ')
+        hosts = mod.hosts.empty? ? 'all' : mod.hosts.join(', ')
+        on_demand = mod.on_demand ? 'yes' : '-'
+
+        [mod.name.to_s, host_status, on_demand, deps, hosts]
+      end
+
+      # Try to use gum table if available and in TTY
+      if $stdout.tty? && system('which gum > /dev/null 2>&1')
+        csv_data = CSV.generate { |csv| csv << headers; rows.each { |r| csv << r } }
+        IO.popen('gum table -p -w 25,15,10,25,25', 'w') do |pipe|
+          pipe.write(csv_data)
+        end
+      else
+        # Fallback to simple formatted output
+        widths = [25, 15, 10, 25, 25]
+        puts "\n" + headers.each_with_index.map { |h, i| h.ljust(widths[i]) }.join(' ')
+        puts '-' * 100
+        rows.each do |row|
+          puts row.each_with_index.map { |v, i| v.ljust(widths[i]) }.join(' ')
+        end
+      end
+    end
+
+    private
+
+    def collect_dependencies(names)
+      @mods_by_name ||= @mods.to_h { |m| [m.name, m] }
+      result = Set.new
+
+      names.each do |name|
+        collect_deps_recursive(name, result)
+      end
+
+      result
+    end
+
+    def collect_deps_recursive(name, result)
+      return if result.include?(name)
+
+      mod = @mods_by_name[name]
+      return unless mod
+
+      mod.dependencies.each do |dep|
+        collect_deps_recursive(dep, result)
+      end
+
+      result << name
+    end
+  end
+
+  class ScopedEnv
+    # Undefine Kernel#test to allow our DSL method to work
+    undef_method :test
+
+    def initialize(delegation_object, methods, prefix = nil)
+      @delegation_object = delegation_object
+      @methods = methods
+      @prefix = prefix
+    end
+
+    def method_missing(symbol, *args, **kwargs, &block)
+      symbol = :"#{@prefix}#{symbol}" if @prefix
+
+      if @methods.include?(symbol)
+        if kwargs.any?
+          @delegation_object.send(symbol, *args, **kwargs, &block)
+        else
+          @delegation_object.send(symbol, *args, &block)
+        end
+      else
+        super
+      end
+    end
+
+    def respond_to_missing?(symbol, include_private = false)
+      @methods.include?(symbol) || super
+    end
+  end
+end
+
+Clamp do
+  subcommand 'setup', 'Initial setup for a new machine' do
+    parameter 'HOSTNAME', 'Machine hostname'
+
+    def execute
+      Dotpro::Dotpro.new.setup(hostname)
+    end
+  end
+
+  subcommand 'up', 'Update dotfiles configuration' do
+    parameter '[MODS] ...', 'Modules to update (default: all)', attribute_name: :mod_list
+    option ['-u', '--update'], :flag, 'Update/upgrade existing packages instead of just installing'
+    option ['-t', '--test'], :flag, 'Run tests after installation'
+
+    def execute
+      only = mod_list.empty? ? nil : mod_list
+      dotpro = Dotpro::Dotpro.new
+      dotpro.up(only: only, update: update?)
+
+      if test?
+        puts
+        Dotpro::Output.header('Running Tests')
+        exit_code = dotpro.test(only: only)
+        exit exit_code if exit_code != 0
+      end
+    end
+  end
+
+  subcommand 'down', 'Tear down dotfiles configuration' do
+    parameter '[MODS] ...', 'Modules to tear down (default: all)', attribute_name: :mod_list
+
+    def execute
+      only = mod_list.empty? ? nil : mod_list
+      Dotpro::Dotpro.new.down(only: only)
+    end
+  end
+
+  subcommand 'list', 'List all available mods and their status' do
+    def execute
+      Dotpro::Dotpro.new.list
+    end
+  end
+
+  subcommand 'test', 'Run tests for mods' do
+    parameter '[MODS] ...', 'Modules to test (default: all with tests)', attribute_name: :mod_list
+    option ['--skip-deps'], :flag, 'Skip running tests for dependencies'
+
+    def execute
+      only = mod_list.empty? ? nil : mod_list
+      exit_code = Dotpro::Dotpro.new.test(only: only, skip_deps: skip_deps?)
+      exit exit_code
+    end
+  end
+
+  subcommand 'git', 'Execute git commands in the dotfiles directory' do
+    parameter '[ARGS] ...', 'Git command and arguments', attribute_name: :git_args
+
+    def execute
+      if git_args.empty?
+        puts "Usage: dot git <command> [args...]"
+        exit 1
+      end
+
+      Dir.chdir(Dotpro::DOT_DIR.to_s) do
+        exit system('git', *git_args) ? 0 : 1
+      end
+    end
+  end
+end
