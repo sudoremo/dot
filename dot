@@ -31,7 +31,7 @@ end
 $stdout = original_stdout
 $stderr = original_stderr
 
-module Dotpro
+module Dot
   # Resolve the dotfiles directory. Prefers DOT_DIR from the environment
   # (set by the wrapper script), falls back to $0's parent directory.
   DOT_DIR = Pathname.new(ENV['DOT_DIR'] || File.dirname(File.expand_path($0)))
@@ -183,7 +183,7 @@ module Dotpro
     end
 
     def dsl_helper(name, &block)
-      ::Dotpro.register_helper(name, @name, &block)
+      ::Dot.register_helper(name, @name, &block)
     end
 
     def dsl_up(&block)
@@ -201,8 +201,8 @@ module Dotpro
     def run(force: false, update: false)
       # Skip if hosts are specified and current host is not in the list
       # unless explicitly forced (mod was specifically requested)
-      if !force && @hosts.any? && !@hosts.include?(::Dotpro.hostname.to_sym)
-        Output.note("Skipping #{@name} (not for host '#{::Dotpro.hostname}')")
+      if !force && @hosts.any? && !@hosts.include?(::Dot.hostname.to_sym)
+        Output.note("Skipping #{@name} (not for host '#{::Dot.hostname}')")
         return
       end
 
@@ -213,8 +213,8 @@ module Dotpro
     def run_down(force: false)
       # Skip if hosts are specified and current host is not in the list
       # unless explicitly forced (mod was specifically requested)
-      if !force && @hosts.any? && !@hosts.include?(::Dotpro.hostname.to_sym)
-        Output.note("Skipping #{@name} (not for host '#{::Dotpro.hostname}')")
+      if !force && @hosts.any? && !@hosts.include?(::Dot.hostname.to_sym)
+        Output.note("Skipping #{@name} (not for host '#{::Dot.hostname}')")
         return
       end
 
@@ -225,8 +225,8 @@ module Dotpro
     def run_test(force: false)
       return :no_test unless @test
 
-      if !force && @hosts.any? && !@hosts.include?(::Dotpro.hostname.to_sym)
-        Output.note("Skipping #{@name} tests (not for host '#{::Dotpro.hostname}')")
+      if !force && @hosts.any? && !@hosts.include?(::Dot.hostname.to_sym)
+        Output.note("Skipping #{@name} tests (not for host '#{::Dot.hostname}')")
         return :skipped
       end
 
@@ -424,7 +424,7 @@ module Dotpro
     end
 
     def dsl_host?(*hosts)
-      hosts.map(&:to_sym).include?(::Dotpro.hostname.to_sym)
+      hosts.map(&:to_sym).include?(::Dot.hostname.to_sym)
     end
 
     def installed_brew_packages
@@ -637,10 +637,10 @@ module Dotpro
     end
 
     def method_missing(name, *args, **kwargs, &block)
-      helper = ::Dotpro.helpers[name.to_sym]
+      helper = ::Dot.helpers[name.to_sym]
 
       unless helper
-        raise NoMethodError, "Unknown helper '#{name}'. Available helpers: #{::Dotpro.helpers.keys.join(', ')}"
+        raise NoMethodError, "Unknown helper '#{name}'. Available helpers: #{::Dot.helpers.keys.join(', ')}"
       end
 
       unless @allowed_dependencies.include?(helper[:mod])
@@ -654,7 +654,7 @@ module Dotpro
     end
 
     def respond_to_missing?(name, include_private = false)
-      ::Dotpro.helpers.key?(name.to_sym) || super
+      ::Dot.helpers.key?(name.to_sym) || super
     end
   end
 
@@ -764,7 +764,7 @@ module Dotpro
     end
   end
 
-  class Dotpro
+  class Dot
     def initialize
       @base_dir = DOT_DIR
     end
@@ -894,7 +894,7 @@ module Dotpro
 
     def list
       @mods ||= ModLoader.new(@base_dir).load
-      current_host = ::Dotpro.hostname.to_sym
+      current_host = ::Dot.hostname.to_sym
 
       headers = ['Module', 'For This Host', 'On Demand', 'Dependencies', 'Configured Hosts']
 
@@ -994,7 +994,7 @@ Clamp do
     parameter 'HOSTNAME', 'Machine hostname'
 
     def execute
-      Dotpro::Dotpro.new.setup(hostname)
+      Dot::Dot.new.setup(hostname)
     end
   end
 
@@ -1005,12 +1005,12 @@ Clamp do
 
     def execute
       only = mod_list.empty? ? nil : mod_list
-      dotpro = Dotpro::Dotpro.new
+      dotpro = Dot::Dot.new
       dotpro.up(only: only, update: update?)
 
       if test?
         puts
-        Dotpro::Output.header('Running Tests')
+        Dot::Output.header('Running Tests')
         exit_code = dotpro.test(only: only)
         exit exit_code if exit_code != 0
       end
@@ -1022,13 +1022,13 @@ Clamp do
 
     def execute
       only = mod_list.empty? ? nil : mod_list
-      Dotpro::Dotpro.new.down(only: only)
+      Dot::Dot.new.down(only: only)
     end
   end
 
   subcommand 'list', 'List all available mods and their status' do
     def execute
-      Dotpro::Dotpro.new.list
+      Dot::Dot.new.list
     end
   end
 
@@ -1038,7 +1038,7 @@ Clamp do
 
     def execute
       only = mod_list.empty? ? nil : mod_list
-      exit_code = Dotpro::Dotpro.new.test(only: only, skip_deps: skip_deps?)
+      exit_code = Dot::Dot.new.test(only: only, skip_deps: skip_deps?)
       exit exit_code
     end
   end
@@ -1052,7 +1052,7 @@ Clamp do
         exit 1
       end
 
-      Dir.chdir(Dotpro::DOT_DIR.to_s) do
+      Dir.chdir(Dot::DOT_DIR.to_s) do
         exit system('git', *git_args) ? 0 : 1
       end
     end
