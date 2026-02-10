@@ -1221,10 +1221,10 @@ Clamp do
           if test -n "$DOT_DIR"
             echo $DOT_DIR
           else
-            set -l dot_path (type -P dot 2>/dev/null)
+            set -l dot_path (command -s dot 2>/dev/null)
             if test -z "$dot_path"
-              # Parse alias from fish abbreviation or function
-              set dot_path (functions dot 2>/dev/null | grep -oE '/[^[:space:]]+dot')
+              # Parse alias from fish function
+              set dot_path (functions dot 2>/dev/null | grep -oE '/[^[:space:]]+dot' | head -1)
             end
             if test -n "$dot_path" -a -f "$dot_path"
               dirname "$dot_path"
