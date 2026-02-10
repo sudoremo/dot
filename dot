@@ -1057,4 +1057,200 @@ Clamp do
       end
     end
   end
+
+  subcommand 'completion', 'Generate shell completion script' do
+    parameter '[SHELL]', 'Shell type (bash, zsh, fish)', default: 'bash'
+
+    def execute
+      case shell
+      when 'bash'
+        puts bash_completion
+      when 'zsh'
+        puts zsh_completion
+      when 'fish'
+        puts fish_completion
+      else
+        $stderr.puts "Unknown shell: #{shell}. Supported: bash, zsh, fish"
+        exit 1
+      end
+    end
+
+    def bash_completion
+      <<~'BASH'
+        # dot completion for bash
+        # Add to ~/.bashrc or ~/.bash_completion:
+        #   eval "$(dot completion bash)"
+
+        _dot_get_dir() {
+          if [[ -n "$DOT_DIR" ]]; then
+            echo "$DOT_DIR"
+          else
+            local dot_path
+            dot_path=$(type -P dot 2>/dev/null)
+            if [[ -z "$dot_path" ]]; then
+              # Parse alias: "dot='/path/to/dot'"
+              dot_path=$(alias dot 2>/dev/null | sed "s/.*='\([^']*\)'.*/\1/")
+            fi
+            if [[ -n "$dot_path" && -f "$dot_path" ]]; then
+              dirname "$dot_path"
+            fi
+          fi
+        }
+
+        _dot_completions() {
+          local cur prev words cword
+          _init_completion 2>/dev/null || {
+            COMPREPLY=()
+            cur="${COMP_WORDS[COMP_CWORD]}"
+            prev="${COMP_WORDS[COMP_CWORD-1]}"
+            words=("${COMP_WORDS[@]}")
+            cword=$COMP_CWORD
+          }
+
+          local dot_dir=$(_dot_get_dir)
+
+          case "$cword" in
+            1)
+              COMPREPLY=($(compgen -W "setup up down list test git completion" -- "$cur"))
+              ;;
+            *)
+              case "${words[1]}" in
+                up|down|test)
+                  local mods=""
+                  if [[ -n "$dot_dir" && -d "$dot_dir/mods" ]]; then
+                    mods=$(ls -1 "$dot_dir/mods" 2>/dev/null)
+                  fi
+                  COMPREPLY=($(compgen -W "$mods" -- "$cur"))
+                  ;;
+                git)
+                  _git 2>/dev/null
+                  ;;
+                completion)
+                  COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+                  ;;
+              esac
+              ;;
+          esac
+        }
+
+        complete -F _dot_completions dot
+      BASH
+    end
+
+    def zsh_completion
+      <<~'ZSH'
+        # dot completion for zsh
+        # Add to ~/.zshrc:
+        #   eval "$(dot completion zsh)"
+
+        _dot_get_dir() {
+          if [[ -n "$DOT_DIR" ]]; then
+            echo "$DOT_DIR"
+          else
+            local dot_path
+            # Try whence -p first (ignores aliases)
+            dot_path=$(whence -p dot 2>/dev/null)
+            if [[ -z "$dot_path" ]]; then
+              # Parse alias: "dot=/path/to/dot" or "dot='/path/to/dot'"
+              dot_path=$(alias dot 2>/dev/null | sed "s/.*='\{0,1\}\([^']*\)'\{0,1\}/\1/")
+            fi
+            if [[ -n "$dot_path" && -f "$dot_path" ]]; then
+              dirname "$dot_path"
+            fi
+          fi
+        }
+
+        _dot_mods() {
+          local dot_dir=$(_dot_get_dir)
+          local -a mods
+          if [[ -n "$dot_dir" && -d "$dot_dir/mods" ]]; then
+            mods=(${dot_dir}/mods/*(/:t))
+          fi
+          _describe -t mods 'mods' mods
+        }
+
+        _dot() {
+          local -a commands
+          commands=(
+            'setup:Initial setup for a new machine'
+            'up:Update dotfiles configuration'
+            'down:Tear down dotfiles configuration'
+            'list:List all available mods'
+            'test:Run tests for mods'
+            'git:Execute git commands in the dotfiles directory'
+            'completion:Generate shell completion script'
+          )
+
+          _arguments -C \
+            '1: :->command' \
+            '*: :->args'
+
+          case "$state" in
+            command)
+              _describe -t commands 'dot commands' commands
+              ;;
+            args)
+              case "$words[2]" in
+                up|down|test)
+                  _dot_mods
+                  ;;
+                git)
+                  shift words
+                  (( CURRENT-- ))
+                  _git
+                  ;;
+                completion)
+                  _values 'shell' bash zsh fish
+                  ;;
+              esac
+              ;;
+          esac
+        }
+
+        compdef _dot dot
+      ZSH
+    end
+
+    def fish_completion
+      <<~'FISH'
+        # dot completion for fish
+        # Add to ~/.config/fish/completions/dot.fish:
+        #   dot completion fish > ~/.config/fish/completions/dot.fish
+
+        function __dot_get_dir
+          if test -n "$DOT_DIR"
+            echo $DOT_DIR
+          else
+            set -l dot_path (type -P dot 2>/dev/null)
+            if test -z "$dot_path"
+              # Parse alias from fish abbreviation or function
+              set dot_path (functions dot 2>/dev/null | grep -oE '/[^[:space:]]+dot')
+            end
+            if test -n "$dot_path" -a -f "$dot_path"
+              dirname "$dot_path"
+            end
+          end
+        end
+
+        function __dot_mods
+          set -l dot_dir (__dot_get_dir)
+          if test -n "$dot_dir" -a -d "$dot_dir/mods"
+            ls -1 "$dot_dir/mods" 2>/dev/null
+          end
+        end
+
+        complete -c dot -f
+        complete -c dot -n "__fish_use_subcommand" -a "setup" -d "Initial setup for a new machine"
+        complete -c dot -n "__fish_use_subcommand" -a "up" -d "Update dotfiles configuration"
+        complete -c dot -n "__fish_use_subcommand" -a "down" -d "Tear down dotfiles configuration"
+        complete -c dot -n "__fish_use_subcommand" -a "list" -d "List all available mods"
+        complete -c dot -n "__fish_use_subcommand" -a "test" -d "Run tests for mods"
+        complete -c dot -n "__fish_use_subcommand" -a "git" -d "Execute git commands in the dotfiles directory"
+        complete -c dot -n "__fish_use_subcommand" -a "completion" -d "Generate shell completion script"
+
+        complete -c dot -n "__fish_seen_subcommand_from up down test" -a "(__dot_mods)"
+        complete -c dot -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
+      FISH
+    end
+  end
 end

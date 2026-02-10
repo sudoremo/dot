@@ -154,6 +154,25 @@ end
 alias dot="$HOME/Dotfiles/dot"
 ```
 
+### Shell Completion
+
+Enable tab completion for commands and mod names:
+
+**Bash** (add to `~/.bashrc`):
+```bash
+eval "$(dot completion bash)"
+```
+
+**Zsh** (add to `~/.zshrc`):
+```bash
+eval "$(dot completion zsh)"
+```
+
+**Fish**:
+```bash
+dot completion fish > ~/.config/fish/completions/dot.fish
+```
+
 ### Usage
 
 ```bash
@@ -168,6 +187,7 @@ alias dot="$HOME/Dotfiles/dot"
 ./dot test                     # Run tests
 ./dot test nvim --skip-deps    # Run tests without dependency tests
 ./dot git status               # Run git commands in the dotfiles directory
+./dot completion bash          # Generate shell completion script
 ```
 
 ## Directory Structure
