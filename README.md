@@ -154,25 +154,6 @@ end
 alias dot="$HOME/Dotfiles/dot"
 ```
 
-### Shell Completion
-
-Enable tab completion for commands and mod names:
-
-**Bash** (add to `~/.bashrc`):
-```bash
-eval "$(dot completion bash)"
-```
-
-**Zsh** (add to `~/.zshrc`):
-```bash
-eval "$(dot completion zsh)"
-```
-
-**Fish**:
-```bash
-dot completion fish > ~/.config/fish/completions/dot.fish
-```
-
 ### Usage
 
 ```bash
@@ -184,10 +165,11 @@ dot completion fish > ~/.config/fish/completions/dot.fish
 ./dot down nvim                # Remove a specific mod
 ./dot down                     # Remove ALL mods (use with caution)
 ./dot list                     # List all mods
+./dot man                      # Show manual for all mods
+./dot man git ssh              # Show manual for specific mods
 ./dot test                     # Run tests
 ./dot test nvim --skip-deps    # Run tests without dependency tests
 ./dot git status               # Run git commands in the dotfiles directory
-./dot completion bash          # Generate shell completion script
 ```
 
 ## Directory Structure
@@ -293,6 +275,23 @@ end
 | `up do ... end` | Installation/configuration logic |
 | `down do ... end` | Removal/cleanup logic (reverse of `up`) |
 | `test do ... end` | Verification logic; raise an exception to signal failure |
+| `man do ... end` | Manual/documentation; returns a description string for `dot man` |
+
+### Documenting Aliases
+
+`dot man` automatically parses aliases and functions from `dot_profile.d.sh`.
+Add a comment directly above each alias/function to document it:
+
+```bash
+# Adds SSH key to current session (default: ~/.ssh/id_ed25519)
+ssh-add-key() {
+  eval "$(ssh-agent -s)"
+  ssh-add "${1:-$HOME/.ssh/id_ed25519}"
+}
+
+# Shows git status
+alias gst='git status'
+```
 
 ### DSL Methods (available in `up`, `down`, `test` blocks)
 

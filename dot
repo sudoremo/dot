@@ -144,7 +144,7 @@ module Dot
   end
 
   class Mod
-    attr_reader :name, :dependencies, :hosts, :priority, :on_demand
+    attr_reader :name, :dependencies, :hosts, :priority, :on_demand, :man_text, :path
 
     def initialize(path)
       @path = path
@@ -153,8 +153,9 @@ module Dot
       @hosts = []
       @priority = 50 # default priority
       @on_demand = false
+      @man_text = nil
 
-      env = ScopedEnv.new(self, %i[dsl_use dsl_hosts dsl_priority dsl_on_demand dsl_up dsl_down dsl_test dsl_helper], :dsl_)
+      env = ScopedEnv.new(self, %i[dsl_use dsl_hosts dsl_priority dsl_on_demand dsl_up dsl_down dsl_test dsl_helper dsl_man], :dsl_)
       env.instance_eval(@path.read)
     end
 
@@ -184,6 +185,10 @@ module Dot
 
     def dsl_helper(name, &block)
       ::Dot.register_helper(name, @name, &block)
+    end
+
+    def dsl_man(&block)
+      @man_text = block
     end
 
     def dsl_up(&block)
@@ -932,7 +937,73 @@ module Dot
       end
     end
 
+    def man(only: nil)
+      @mods ||= ModLoader.new(@base_dir).load
+
+      mods_to_show = if only
+        names = only.map(&:to_sym)
+        unknown = names - @mods.map(&:name)
+        raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
+        @mods.select { |m| names.include?(m.name) }
+      else
+        @mods
+      end
+
+      mods_to_show.each do |mod|
+        print_mod_manual(mod)
+      end
+    end
+
     private
+
+    def print_mod_manual(mod)
+      Output.header(mod.name.to_s)
+
+      # Print description from man block
+      if mod.man_text
+        puts mod.man_text.call
+      else
+        puts "No description available.".light_black
+      end
+
+      # Parse and print aliases from dot_profile.d.sh
+      profile_path = mod.path.parent.join('dot_profile.d.sh')
+      return unless profile_path.exist?
+
+      aliases = parse_aliases(profile_path)
+      return if aliases.empty?
+
+      puts
+      puts "Aliases & Functions:".bold
+      aliases.each do |name, desc|
+        if desc.empty?
+          puts "  #{name.cyan}"
+        else
+          puts "  #{name.cyan.ljust(30)} #{desc.light_black}"
+        end
+      end
+    end
+
+    def parse_aliases(path)
+      content = File.read(path)
+      lines = content.lines
+      aliases = []
+
+      lines.each_with_index do |line, i|
+        # Match alias or function definition
+        if line =~ /^alias\s+(\w+)=/ || line =~ /^(\w[\w-]*)\s*\(\)\s*\{?/
+          name = $1
+          # Look for comment on previous line
+          desc = ""
+          if i > 0 && lines[i-1] =~ /^#\s*(.+)/
+            desc = $1.strip
+          end
+          aliases << [name, desc]
+        end
+      end
+
+      aliases
+    end
 
     def collect_dependencies(names)
       @mods_by_name ||= @mods.to_h { |m| [m.name, m] }
@@ -1032,6 +1103,15 @@ Clamp do
     end
   end
 
+  subcommand 'man', 'Show manual for mods' do
+    parameter '[MODS] ...', 'Modules to show manual for (default: all)', attribute_name: :mod_list
+
+    def execute
+      only = mod_list.empty? ? nil : mod_list
+      Dot::Dot.new.man(only: only)
+    end
+  end
+
   subcommand 'test', 'Run tests for mods' do
     parameter '[MODS] ...', 'Modules to test (default: all with tests)', attribute_name: :mod_list
     option ['--skip-deps'], :flag, 'Skip running tests for dependencies'
@@ -1111,11 +1191,11 @@ Clamp do
 
           case "$cword" in
             1)
-              COMPREPLY=($(compgen -W "setup up down list test git completion" -- "$cur"))
+              COMPREPLY=($(compgen -W "setup up down list man test git completion" -- "$cur"))
               ;;
             *)
               case "${words[1]}" in
-                up|down|test)
+                up|down|test|man)
                   local mods=""
                   if [[ -n "$dot_dir" && -d "$dot_dir/mods" ]]; then
                     mods=$(ls -1 "$dot_dir/mods" 2>/dev/null)
@@ -1176,6 +1256,7 @@ Clamp do
             'up:Update dotfiles configuration'
             'down:Tear down dotfiles configuration'
             'list:List all available mods'
+            'man:Show manual for mods'
             'test:Run tests for mods'
             'git:Execute git commands in the dotfiles directory'
             'completion:Generate shell completion script'
@@ -1191,7 +1272,7 @@ Clamp do
               ;;
             args)
               case "$words[2]" in
-                up|down|test)
+                up|down|test|man)
                   _dot_mods
                   ;;
                 git)
@@ -1244,11 +1325,12 @@ Clamp do
         complete -c dot -n "__fish_use_subcommand" -a "up" -d "Update dotfiles configuration"
         complete -c dot -n "__fish_use_subcommand" -a "down" -d "Tear down dotfiles configuration"
         complete -c dot -n "__fish_use_subcommand" -a "list" -d "List all available mods"
+        complete -c dot -n "__fish_use_subcommand" -a "man" -d "Show manual for mods"
         complete -c dot -n "__fish_use_subcommand" -a "test" -d "Run tests for mods"
         complete -c dot -n "__fish_use_subcommand" -a "git" -d "Execute git commands in the dotfiles directory"
         complete -c dot -n "__fish_use_subcommand" -a "completion" -d "Generate shell completion script"
 
-        complete -c dot -n "__fish_seen_subcommand_from up down test" -a "(__dot_mods)"
+        complete -c dot -n "__fish_seen_subcommand_from up down test man" -a "(__dot_mods)"
         complete -c dot -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
       FISH
     end
