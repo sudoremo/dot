@@ -181,6 +181,7 @@ dot completion fish > ~/.config/fish/completions/dot.fish
 ./dot up git nvim              # Install specific mods (with dependencies)
 ./dot up -u                    # Update/upgrade packages
 ./dot up -t                    # Install and run tests
+./dot up --skip orb,fonts      # Install all mods except orb and fonts
 ./dot down nvim                # Remove a specific mod
 ./dot down                     # Remove ALL mods (use with caution)
 ./dot list                     # List all mods

@@ -800,8 +800,14 @@ module Dot
       Output.success('Setup complete. Run "dot up" to apply configuration.')
     end
 
-    def up(only: nil, update: false)
+    def up(only: nil, skip: nil, update: false)
       @mods ||= ModLoader.new(@base_dir).load
+      skip_names = skip&.map(&:to_sym) || []
+
+      if skip_names.any?
+        unknown = skip_names - @mods.map(&:name)
+        raise "Unknown module(s) to skip: #{unknown.join(', ')}" if unknown.any?
+      end
 
       if only
         names = only.map(&:to_sym)
@@ -818,17 +824,29 @@ module Dot
         # Run mods - force all (including dependencies) since they're required by explicit request
         # Only apply updates to explicitly requested mods
         mods_to_run.each do |mod|
+          next if skip_names.include?(mod.name)
+
           is_explicit = explicitly_requested.include?(mod.name)
           mod.run(force: true, update: update && is_explicit)
         end
       else
         # No mods specified, run all applicable mods normally (skip on_demand mods)
-        @mods.reject(&:on_demand).each { |mod| mod.run(update: update) }
+        @mods.reject(&:on_demand).each do |mod|
+          next if skip_names.include?(mod.name)
+
+          mod.run(update: update)
+        end
       end
     end
 
-    def down(only: nil)
+    def down(only: nil, skip: nil)
       @mods ||= ModLoader.new(@base_dir).load
+      skip_names = skip&.map(&:to_sym) || []
+
+      if skip_names.any?
+        unknown = skip_names - @mods.map(&:name)
+        raise "Unknown module(s) to skip: #{unknown.join(', ')}" if unknown.any?
+      end
 
       if only
         names = only.map(&:to_sym)
@@ -840,11 +858,17 @@ module Dot
         mods_to_run = @mods.select { |m| names.include?(m.name) }
 
         mods_to_run.each do |mod|
+          next if skip_names.include?(mod.name)
+
           mod.run_down(force: true)
         end
       else
         # No mods specified, run all applicable mods normally
-        @mods.reverse.each(&:run_down)
+        @mods.reverse.each do |mod|
+          next if skip_names.include?(mod.name)
+
+          mod.run_down
+        end
       end
     end
 
@@ -1002,11 +1026,13 @@ Clamp do
     parameter '[MODS] ...', 'Modules to update (default: all)', attribute_name: :mod_list
     option ['-u', '--update'], :flag, 'Update/upgrade existing packages instead of just installing'
     option ['-t', '--test'], :flag, 'Run tests after installation'
+    option ['-s', '--skip'], 'MODS', 'Comma-separated list of modules to skip'
 
     def execute
       only = mod_list.empty? ? nil : mod_list
+      skip_list = skip ? skip.split(',').map(&:strip) : nil
       dotpro = Dot::Dot.new
-      dotpro.up(only: only, update: update?)
+      dotpro.up(only: only, skip: skip_list, update: update?)
 
       if test?
         puts
@@ -1019,10 +1045,12 @@ Clamp do
 
   subcommand 'down', 'Tear down dotfiles configuration' do
     parameter '[MODS] ...', 'Modules to tear down (default: all)', attribute_name: :mod_list
+    option ['-s', '--skip'], 'MODS', 'Comma-separated list of modules to skip'
 
     def execute
       only = mod_list.empty? ? nil : mod_list
-      Dot::Dot.new.down(only: only)
+      skip_list = skip ? skip.split(',').map(&:strip) : nil
+      Dot::Dot.new.down(only: only, skip: skip_list)
     end
   end
 

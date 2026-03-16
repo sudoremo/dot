@@ -7,8 +7,8 @@ into self-contained modules ("mods") using a Ruby DSL.
 
 ```
 ./dot setup <hostname>      # One-time machine setup
-./dot up [mod ...]          # Install mods (-u to upgrade packages, -t to test)
-./dot down [mod ...]        # Remove mods
+./dot up [mod ...]          # Install mods (-u to upgrade packages, -t to test, -s to skip)
+./dot down [mod ...]        # Remove mods (-s to skip)
 ./dot list                  # List all mods
 ./dot test [mod ...]        # Run tests (--skip-deps to skip dependency tests)
 ./dot git <args>            # Run git in the dotfiles directory
