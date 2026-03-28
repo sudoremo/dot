@@ -125,6 +125,15 @@ end
 8. **Preserve user data** -- never delete files the user may have created outside
    of dot.
 
+## Alias Descriptions
+
+Alias descriptions for `dot man` must be a comment on the line **before** the alias:
+
+```sh
+# Show history with timestamps
+alias history='history -i'
+```
+
 ## The `.d` Pattern
 
 A recommended pattern for shell configuration: a base `shell` mod owns
