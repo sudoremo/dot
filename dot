@@ -20,16 +20,28 @@ original_stderr = $stderr
 $stdout = File.open(File::NULL, 'w')
 $stderr = File.open(File::NULL, 'w')
 
-gemfile(true) do
-  source 'https://rubygems.org'
+begin
+  # Bundler loads the plugins of the current directory's project, and their
+  # install hooks would run against that project's Gemfile.
+  Dir.chdir(Dir.home) do
+    gemfile(true) do
+      source 'https://rubygems.org'
 
-  gem 'colorize'
-  gem 'pry'
-  gem 'clamp'
+      gem 'colorize'
+      gem 'pry'
+      gem 'clamp'
+    end
+  end
+rescue StandardError, LoadError => e
+  $stdout = original_stdout
+  $stderr = original_stderr
+  warn "\e[31mError: Could not install the gems dot depends on.\e[0m"
+  warn "#{e.class}: #{e.message}"
+  exit 1
+ensure
+  $stdout = original_stdout
+  $stderr = original_stderr
 end
-
-$stdout = original_stdout
-$stderr = original_stderr
 
 module Dot
   # Resolve the dotfiles directory. Prefers DOT_DIR from the environment
