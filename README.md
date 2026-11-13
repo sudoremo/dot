@@ -201,6 +201,8 @@ Your dotfiles repository will look something like this:
 ├── switches/                  # Runtime state (gitignored)
 │   ├── hostname               # Current machine hostname
 │   └── set-up                 # Setup completion flag
+├── allowlists/                # Optional, committed
+│   └── sandbox                # The only mods host "sandbox" may run
 └── mods/
     ├── shell/
     │   ├── mod.rb
@@ -375,6 +377,34 @@ end
 
 Helpers are dependency-checked at runtime — a mod can only call helpers from
 its declared dependencies.
+
+## Host Allowlists
+
+`hosts` decides which mods a plain `./dot up` runs on a machine, but a mod named
+on the command line, or pulled in as a dependency, runs anywhere. That is the
+right default for your own machines and the wrong one for a machine that must
+never run some of them — a VM or a shared box that should not get your password
+store, for example.
+
+For such a host, commit a file `allowlists/<hostname>` listing the mods it may
+run, one per line (`#` starts a comment):
+
+```
+# allowlists/sandbox
+shell
+git
+nvim
+```
+
+On that host, every other mod is not loaded at all:
+
+- `./dot up` and `./dot down` run only the listed mods (still honouring `hosts`).
+- `./dot up <mod>`, `down` and `test` refuse a mod that is not listed.
+- A listed mod that depends on an unlisted one is an error, rather than a silent
+  reason to run it.
+- `./dot list` shows only the listed mods.
+
+A host without an allowlist runs every mod, as before.
 
 ## Priority System
 

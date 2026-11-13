@@ -60,6 +60,17 @@ module Dot
     end
   end
 
+  # The mods this host may run, from `allowlists/<hostname>`, or nil when the
+  # host has no allowlist and may run every mod.
+  def self.allowlist
+    return @allowlist if defined?(@allowlist)
+
+    path = DOT_DIR.join('allowlists', hostname)
+    @allowlist = if path.exist?
+                   path.read.lines.map { |line| line.sub(/#.*/, '').strip }.reject(&:empty?).map(&:to_sym)
+                 end
+  end
+
   # Helper registry - allows mods to define reusable helpers that dependent mods can call
   @helpers = {}
 
@@ -672,6 +683,7 @@ module Dot
 
   class CircularDependencyError < StandardError; end
   class UnknownDependencyError < StandardError; end
+  class NotAllowedError < StandardError; end
 
   class ModLoader
     def initialize(base_dir)
@@ -683,7 +695,31 @@ module Dot
         Mod.new(Pathname.new(path))
       end
 
-      DependencyResolver.new(mods).resolve
+      DependencyResolver.new(restrict_to_allowlist(mods)).resolve
+    end
+
+    private
+
+    # A mod missing from the allowlist is not loaded at all, so no request,
+    # dependency or `on_demand` path can run it on this host.
+    def restrict_to_allowlist(mods)
+      allowed = ::Dot.allowlist
+      return mods unless allowed
+
+      names = mods.map(&:name)
+      unknown = allowed - names
+      raise UnknownDependencyError, "allowlists/#{::Dot.hostname} names unknown module(s): #{unknown.join(', ')}" if unknown.any?
+
+      kept = mods.select { |mod| allowed.include?(mod.name) }
+      kept.each do |mod|
+        missing = mod.dependencies - allowed
+        next if missing.empty?
+
+        raise NotAllowedError,
+              "Module '#{mod.name}' depends on #{missing.join(', ')}, which allowlists/#{::Dot.hostname} does not allow"
+      end
+
+      kept
     end
   end
 
@@ -823,6 +859,7 @@ module Dot
 
       if only
         names = only.map(&:to_sym)
+        refuse_disallowed!(names)
         unknown = names - @mods.map(&:name)
         raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
 
@@ -862,6 +899,7 @@ module Dot
 
       if only
         names = only.map(&:to_sym)
+        refuse_disallowed!(names)
         unknown = names - @mods.map(&:name)
         raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
 
@@ -891,6 +929,7 @@ module Dot
 
       mods_to_test = if only
         names = only.map(&:to_sym)
+        refuse_disallowed!(names)
         unknown = names - @mods.map(&:name)
         raise "Unknown module(s): #{unknown.join(', ')}" if unknown.any?
 
@@ -969,6 +1008,16 @@ module Dot
     end
 
     private
+
+    def refuse_disallowed!(names)
+      allowed = ::Dot.allowlist
+      return unless allowed
+
+      refused = names - allowed
+      return if refused.empty?
+
+      raise NotAllowedError, "Not allowed on host '#{::Dot.hostname}' (see allowlists/#{::Dot.hostname}): #{refused.join(', ')}"
+    end
 
     def collect_dependencies(names)
       @mods_by_name ||= @mods.to_h { |m| [m.name, m] }
