@@ -303,9 +303,9 @@ end
 
 | Method | Description |
 |---|---|
-| `install_brew 'package'` | Install a Homebrew formula |
+| `install_brew 'package'` | Install a Homebrew formula. A third-party one is named `user/tap/formula`: dot taps it and trusts that formula alone, as Homebrew 7 requires |
 | `remove_brew 'package'` | Remove a Homebrew formula |
-| `install_cask 'app'` | Install a Homebrew cask |
+| `install_cask 'app'` | Install a Homebrew cask, `user/tap/cask` for a third-party one |
 | `remove_cask 'app'` | Remove a Homebrew cask |
 | `install_gem 'gem'` | Install a Ruby gem |
 | `install_pip 'package'` | Install a pip package |

@@ -450,6 +450,16 @@ module Dot
       hosts.map(&:to_sym).include?(::Dot.hostname.to_sym)
     end
 
+    # A formula or cask from a third-party tap is named `user/tap/name`. Since
+    # Homebrew 7 it loads only once trusted, so trust exactly that one rather
+    # than the whole tap. Returns the bare name, which is what `brew list` shows.
+    def trust_tapped(package, kind)
+      return package unless package.count('/') == 2
+
+      exec_cmd("brew trust #{kind} #{package} >/dev/null", fail_silently: true)
+      package.split('/').last
+    end
+
     def installed_brew_packages
       @installed_brew_packages ||= `brew list --formula -1 2>/dev/null`.split("\n").to_set
     end
@@ -482,19 +492,20 @@ module Dot
 
     def dsl_install_brew(package)
       package = package.to_s
+      name = trust_tapped(package, '--formula')
 
-      if @update && installed_brew_packages.include?(package)
+      if @update && installed_brew_packages.include?(name)
         Output.task("Update #{package}", type: 'brew')
         Output.subtask("Updating...")
         exec_cmd("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew upgrade #{package}", fail_silently: true)
       else
         Output.task("Install #{package}", type: 'brew')
-        if installed_brew_packages.include?(package)
+        if installed_brew_packages.include?(name)
           Output.note("Already installed")
         else
           Output.subtask("Installing...")
           exec_cmd("brew install #{package}")
-          @installed_brew_packages << package
+          @installed_brew_packages << name
         end
       end
     end
@@ -504,12 +515,13 @@ module Dot
       Output.task("Remove #{package}", type: 'brew')
       Output.subtask("Uninstalling...")
       exec_cmd("brew uninstall -f #{package} >/dev/null 2>&1", fail_silently: true)
-      @installed_brew_packages&.delete(package)
+      @installed_brew_packages&.delete(package.split('/').last)
     end
 
     def dsl_install_cask(cask)
       cask = cask.to_s
-      cask_listed = installed_brew_casks.include?(cask)
+      name = trust_tapped(cask, '--cask')
+      cask_listed = installed_brew_casks.include?(name)
       artifacts_present = cask_listed && cask_artifacts_exist?(cask)
 
       if @update && artifacts_present
@@ -526,7 +538,7 @@ module Dot
         else
           Output.subtask("Installing...")
           exec_cmd("brew install --cask #{cask}")
-          @installed_brew_casks << cask
+          @installed_brew_casks << name
         end
       end
     end
@@ -536,7 +548,7 @@ module Dot
       Output.task("Remove #{cask}", type: 'cask')
       Output.subtask("Uninstalling...")
       exec_cmd("brew uninstall --cask #{cask} >/dev/null 2>&1", fail_silently: true)
-      @installed_brew_casks&.delete(cask)
+      @installed_brew_casks&.delete(cask.split('/').last)
     end
 
     def dsl_install_gem(package)
